@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { RetryGradingButton } from "@/components/RetryGradingButton";
 
 export default function Results() {
   const navigate = useNavigate();
@@ -61,9 +62,16 @@ export default function Results() {
 
       const { data, error } = await supabase
         .from("submissions")
-        .select("id, student_name, status, created_at")
+        .select(`
+          id, 
+          student_name, 
+          status, 
+          created_at,
+          assignment_id,
+          assignments!inner(focus_profile_id)
+        `)
         .eq("user_id", user.id)
-        .eq("status", "pending")
+        .in("status", ["pending", "processing", "error"])
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -122,11 +130,25 @@ export default function Results() {
               <div className="space-y-3">
                 {pendingSubmissions.map((submission) => (
                   <div key={submission.id} className="space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium">{submission.student_name}</span>
-                      <span className="text-muted-foreground">Processing...</span>
+                    <div className="flex items-center justify-between text-sm gap-2">
+                      <span className="font-medium flex-1">{submission.student_name}</span>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={submission.status === 'error' ? 'destructive' : 'secondary'}>
+                          {submission.status === 'error' ? 'Failed' : 'Processing...'}
+                        </Badge>
+                        {submission.status === 'error' && (
+                          <RetryGradingButton
+                            submissionId={submission.id}
+                            focusProfileId={(submission.assignments as any)?.focus_profile_id}
+                            onSuccess={() => {
+                              loadPendingSubmissions();
+                              loadResults();
+                            }}
+                          />
+                        )}
+                      </div>
                     </div>
-                    <Progress value={undefined} className="h-2" />
+                    {submission.status !== 'error' && <Progress value={undefined} className="h-2" />}
                   </div>
                 ))}
               </div>

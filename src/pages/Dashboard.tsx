@@ -86,7 +86,7 @@ export default function Dashboard() {
   const loadStats = async (userId: string) => {
     const [rubrics, pendingSubmissions, totalSubmissions, results] = await Promise.all([
       supabase.from("rubrics").select("id", { count: "exact" }).eq("user_id", userId),
-      supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId).eq("status", "pending"),
+      supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId).in("status", ["pending", "processing"]),
       supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId),
       supabase.from("results").select("id", { count: "exact" }).eq("user_id", userId)
     ]);

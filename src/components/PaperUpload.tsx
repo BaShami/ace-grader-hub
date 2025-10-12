@@ -217,7 +217,7 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="lg" className="w-full" disabled={rubrics.length === 0}>
+        <Button size="lg" className="w-full">
           <Upload className="mr-2 h-5 w-5" />
           Upload Papers
         </Button>
@@ -226,7 +226,16 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
         <DialogHeader>
           <DialogTitle>Upload Student Papers</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4">
+        
+        {rubrics.length === 0 ? (
+          <div className="py-8 text-center space-y-4">
+            <p className="text-muted-foreground">No rubrics found. Please upload a rubric first.</p>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Close
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
           <div>
             <Label>Rubric</Label>
             <Select value={selectedRubric} onValueChange={setSelectedRubric}>
@@ -326,6 +335,7 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
             )}
           </Button>
         </div>
+        )}
       </DialogContent>
     </Dialog>
   );

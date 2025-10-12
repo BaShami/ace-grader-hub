@@ -28,7 +28,7 @@ const aiGradingResponseSchema = z.object({
 });
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_TEXT_LENGTH = 100000; // 100k chars
+const MAX_TEXT_LENGTH = 200000; // 200k chars - more reasonable for academic papers
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -168,18 +168,21 @@ serve(async (req) => {
 
     const submissionText = await fileData.text();
     
-    // Validate text length
+    // Intelligently truncate if text is too long
+    let processedText = submissionText;
     if (submissionText.length > MAX_TEXT_LENGTH) {
-      console.error('[grade-submission] Text too long:', submissionText.length);
-      await serviceClient
-        .from('submissions')
-        .update({ status: 'error' })
-        .eq('id', submissionId);
+      console.log('[grade-submission] Text too long, truncating intelligently:', submissionText.length);
       
-      return new Response(
-        JSON.stringify({ error: 'Submission content exceeds maximum length' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+      // Keep first 60% and last 20% of the text to preserve intro and conclusion
+      const keepFirst = Math.floor(MAX_TEXT_LENGTH * 0.7);
+      const keepLast = Math.floor(MAX_TEXT_LENGTH * 0.3);
+      
+      const firstPart = submissionText.substring(0, keepFirst);
+      const lastPart = submissionText.substring(submissionText.length - keepLast);
+      
+      processedText = firstPart + '\n\n[... middle section truncated due to length ...]\n\n' + lastPart;
+      
+      console.log('[grade-submission] Truncated to:', processedText.length);
     }
 
     // Call Lovable AI to grade
@@ -205,7 +208,7 @@ serve(async (req) => {
           },
           {
             role: 'user',
-            content: `Rubric: ${rubric.name}\n\nFocus on these criteria ONLY:\n${criteriaContext}\n\nStudent submission:\n${submissionText}\n\nProvide scores, rationale, and evidence for each criterion. Also identify 2-3 key strengths and 2-3 areas for improvement.`
+            content: `Rubric: ${rubric.name}\n\nFocus on these criteria ONLY:\n${criteriaContext}\n\nStudent submission:\n${processedText}\n\nProvide scores, rationale, and evidence for each criterion. Also identify 2-3 key strengths and 2-3 areas for improvement.`
           }
         ],
         tools: [
