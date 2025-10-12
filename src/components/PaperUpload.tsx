@@ -63,10 +63,14 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
   };
 
   const loadFocusProfiles = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
     const { data, error } = await supabase
       .from("focus_profiles")
       .select("*")
-      .eq("rubric_id", selectedRubric);
+      .eq("rubric_id", selectedRubric)
+      .eq("user_id", user.id);
     
     if (!error && data) {
       setFocusProfiles(data);
@@ -119,6 +123,46 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
+      // Get the rubric to find subject_id
+      const { data: rubric, error: rubricError } = await supabase
+        .from("rubrics")
+        .select("subject_id")
+        .eq("id", selectedRubric)
+        .single();
+
+      if (rubricError || !rubric) throw new Error("Rubric not found");
+
+      // Create or get assignment for this rubric
+      let assignmentId: string;
+      
+      const { data: existingAssignment } = await supabase
+        .from("assignments")
+        .select("id")
+        .eq("rubric_id", selectedRubric)
+        .eq("focus_profile_id", selectedProfile)
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (existingAssignment) {
+        assignmentId = existingAssignment.id;
+      } else {
+        // Create a new assignment
+        const { data: newAssignment, error: assignmentError } = await supabase
+          .from("assignments")
+          .insert({
+            name: `Paper Grading - ${new Date().toLocaleDateString()}`,
+            rubric_id: selectedRubric,
+            focus_profile_id: selectedProfile,
+            subject_id: rubric.subject_id,
+            user_id: user.id
+          })
+          .select()
+          .single();
+
+        if (assignmentError) throw assignmentError;
+        assignmentId = newAssignment.id;
+      }
+
       const uploadPromises = files.map(async ({ file, studentName }) => {
         const fileExt = file.name.split('.').pop();
         const filePath = `${user.id}/${crypto.randomUUID()}.${fileExt}`;
@@ -134,7 +178,7 @@ export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, pre
           .insert({
             student_name: studentName,
             file_path: filePath,
-            assignment_id: selectedRubric,
+            assignment_id: assignmentId,
             user_id: user.id,
             status: 'pending'
           })
