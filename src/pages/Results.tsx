@@ -4,19 +4,25 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Results() {
   const navigate = useNavigate();
   const [results, setResults] = useState<any[]>([]);
+  const [pendingSubmissions, setPendingSubmissions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadResults();
+    loadPendingSubmissions();
     
     // Poll for updates every 5 seconds
-    const interval = setInterval(loadResults, 5000);
+    const interval = setInterval(() => {
+      loadResults();
+      loadPendingSubmissions();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -45,6 +51,25 @@ export default function Results() {
       toast.error("Failed to load results");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadPendingSubmissions = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data, error } = await supabase
+        .from("submissions")
+        .select("id, student_name, status, created_at")
+        .eq("user_id", user.id)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      setPendingSubmissions(data || []);
+    } catch (error: any) {
+      console.error("Load pending submissions error:", error);
     }
   };
 
@@ -84,7 +109,32 @@ export default function Results() {
           </div>
         </div>
 
-        {results.length === 0 ? (
+        {/* Pending Submissions Progress */}
+        {pendingSubmissions.length > 0 && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                Grading in Progress ({pendingSubmissions.length} paper{pendingSubmissions.length > 1 ? 's' : ''})
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {pendingSubmissions.map((submission) => (
+                  <div key={submission.id} className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium">{submission.student_name}</span>
+                      <span className="text-muted-foreground">Processing...</span>
+                    </div>
+                    <Progress value={undefined} className="h-2" />
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {results.length === 0 && pendingSubmissions.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
               <p className="text-muted-foreground">No results yet. Upload and grade papers to see results here.</p>

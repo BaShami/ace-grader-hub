@@ -7,6 +7,8 @@ import { Settings, LogOut, FileText, Upload, GraduationCap, Loader2 } from "luci
 import { RubricUpload } from "@/components/RubricUpload";
 import { PaperUpload } from "@/components/PaperUpload";
 import { SubjectCard } from "@/components/SubjectCard";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { OnboardingTour } from "@/components/OnboardingTour";
 import heroGrading from "@/assets/hero-grading.jpg";
 
 interface Subject {
@@ -31,10 +33,12 @@ export default function Dashboard() {
   const [stats, setStats] = useState({
     rubrics: 0,
     pendingSubmissions: 0,
+    totalSubmissions: 0,
     results: 0
   });
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [rubrics, setRubrics] = useState<Rubric[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     checkUser();
@@ -80,15 +84,17 @@ export default function Dashboard() {
   };
 
   const loadStats = async (userId: string) => {
-    const [rubrics, submissions, results] = await Promise.all([
+    const [rubrics, pendingSubmissions, totalSubmissions, results] = await Promise.all([
       supabase.from("rubrics").select("id", { count: "exact" }).eq("user_id", userId),
       supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId).eq("status", "pending"),
+      supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId),
       supabase.from("results").select("id", { count: "exact" }).eq("user_id", userId)
     ]);
 
     setStats({
       rubrics: rubrics.count || 0,
-      pendingSubmissions: submissions.count || 0,
+      pendingSubmissions: pendingSubmissions.count || 0,
+      totalSubmissions: totalSubmissions.count || 0,
       results: results.count || 0
     });
   };
@@ -143,7 +149,7 @@ export default function Dashboard() {
             Academic ACE Grader
           </h1>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon">
+            <Button variant="ghost" size="icon" onClick={() => setSettingsOpen(true)}>
               <Settings className="w-5 h-5" />
             </Button>
             <Button variant="ghost" size="icon" onClick={handleSignOut}>
@@ -199,9 +205,11 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="text-3xl font-bold">{stats.pendingSubmissions}</div>
+              <div className="text-3xl font-bold">{stats.totalSubmissions}</div>
               <p className="text-sm text-muted-foreground">
-                Select a subject below or upload directly
+                {stats.pendingSubmissions > 0 
+                  ? `${stats.pendingSubmissions} being graded` 
+                  : "Select a subject below or upload directly"}
               </p>
               <PaperUpload onSuccess={refreshStats} />
             </CardContent>
@@ -254,6 +262,9 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <OnboardingTour onComplete={() => {}} />
     </div>
   );
 }

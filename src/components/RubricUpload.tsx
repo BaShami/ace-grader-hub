@@ -67,6 +67,20 @@ export function RubricUpload({ onSuccess }: RubricUploadProps) {
 
       // Create new subject if needed
       if (createNew && newSubjectName) {
+        // Check for duplicate subject name
+        const { data: existingSubject } = await supabase
+          .from("subjects")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("name", newSubjectName)
+          .maybeSingle();
+
+        if (existingSubject) {
+          toast.error("A subject with this name already exists");
+          setLoading(false);
+          return;
+        }
+
         const { data: newSubject, error: subjectError } = await supabase
           .from("subjects")
           .insert({ name: newSubjectName, user_id: user.id })
@@ -93,20 +107,54 @@ export function RubricUpload({ onSuccess }: RubricUploadProps) {
 
       if (uploadError) throw uploadError;
 
-      // Create rubric record
-      const { data: rubric, error: rubricError } = await supabase
+      // Check if rubric already exists for this subject (overwrite if it does)
+      const { data: existingRubric } = await supabase
         .from("rubrics")
-        .insert({
-          name: rubricName,
-          subject_id: finalSubjectId,
-          user_id: user.id,
-          file_path: filePath,
-          criteria: []
-        })
-        .select()
-        .single();
+        .select("id, file_path")
+        .eq("subject_id", finalSubjectId)
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-      if (rubricError) throw rubricError;
+      let rubric;
+      
+      if (existingRubric) {
+        // Delete old file
+        if (existingRubric.file_path) {
+          await supabase.storage.from("rubrics").remove([existingRubric.file_path]);
+        }
+        
+        // Update existing rubric
+        const { data: updated, error: updateError } = await supabase
+          .from("rubrics")
+          .update({
+            name: rubricName,
+            file_path: filePath,
+            criteria: []
+          })
+          .eq("id", existingRubric.id)
+          .select()
+          .single();
+
+        if (updateError) throw updateError;
+        rubric = updated;
+        toast.info("Existing rubric overwritten");
+      } else {
+        // Create new rubric record
+        const { data: newRubric, error: rubricError } = await supabase
+          .from("rubrics")
+          .insert({
+            name: rubricName,
+            subject_id: finalSubjectId,
+            user_id: user.id,
+            file_path: filePath,
+            criteria: []
+          })
+          .select()
+          .single();
+
+        if (rubricError) throw rubricError;
+        rubric = newRubric;
+      }
 
       // Call edge function to process rubric
       toast.info("Processing rubric with AI...");

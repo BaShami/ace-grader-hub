@@ -87,6 +87,21 @@ export function FocusSelector({ rubricId, open, onOpenChange, onSuccess }: Focus
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
+      // Check for duplicate profile name
+      const { data: existingProfile } = await supabase
+        .from("focus_profiles")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("rubric_id", rubricId)
+        .eq("name", profileName)
+        .maybeSingle();
+
+      if (existingProfile) {
+        toast.error("A focus profile with this name already exists for this rubric");
+        setLoading(false);
+        return;
+      }
+
       const { error } = await supabase
         .from("focus_profiles")
         .insert({
