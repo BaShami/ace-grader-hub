@@ -1,97 +1,81 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
-import { toast } from "sonner";
-import {
-  BookOpen,
-  FileText,
-  Target,
-  Upload,
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  HelpCircle,
-  Settings,
-  LogOut,
-} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Settings, LogOut, FileText, Upload, GraduationCap, Loader2 } from "lucide-react";
+import { RubricUpload } from "@/components/RubricUpload";
+import { PaperUpload } from "@/components/PaperUpload";
+import { FocusSelector } from "@/components/FocusSelector";
 import heroGrading from "@/assets/hero-grading.jpg";
 
-const Dashboard = () => {
+export default function Dashboard() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<any>(null);
+  const [stats, setStats] = useState({
+    rubrics: 0,
+    pendingSubmissions: 0,
+    results: 0
+  });
+  const [focusSelectorOpen, setFocusSelectorOpen] = useState(false);
+  const [selectedRubricId, setSelectedRubricId] = useState("");
 
   useEffect(() => {
     checkUser();
   }, []);
 
   const checkUser = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
       navigate("/auth");
       return;
     }
-    setUser(session.user);
+    setUser(user);
+    loadStats(user.id);
     setLoading(false);
+  };
+
+  const loadStats = async (userId: string) => {
+    const [rubrics, submissions, results] = await Promise.all([
+      supabase.from("rubrics").select("id", { count: "exact" }).eq("user_id", userId),
+      supabase.from("submissions").select("id", { count: "exact" }).eq("user_id", userId).eq("status", "pending"),
+      supabase.from("results").select("id", { count: "exact" }).eq("user_id", userId)
+    ]);
+
+    setStats({
+      rubrics: rubrics.count || 0,
+      pendingSubmissions: submissions.count || 0,
+      results: results.count || 0
+    });
   };
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    toast.success("Signed out successfully");
     navigate("/");
+  };
+
+  const refreshStats = () => {
+    if (user) loadStats(user.id);
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
-          <p className="mt-4 text-muted-foreground">Loading...</p>
-        </div>
+      <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center">
+        <Loader2 className="h-12 w-12 animate-spin text-primary" />
       </div>
     );
   }
 
-  const stats = [
-    {
-      icon: Clock,
-      title: "Pending Grades",
-      value: "0",
-      description: "No submissions waiting",
-      color: "orange",
-    },
-    {
-      icon: CheckCircle2,
-      title: "Recent Results",
-      value: "0",
-      description: "No graded submissions yet",
-      color: "success",
-    },
-    {
-      icon: AlertCircle,
-      title: "Flagged",
-      value: "0",
-      description: "No items need attention",
-      color: "warning",
-    },
-  ];
-
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5">
       {/* Header */}
-      <header className="border-b bg-card shadow-sm">
+      <header className="border-b bg-card/50 backdrop-blur-sm shadow-sm sticky top-0 z-10">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold bg-gradient-primary bg-clip-text text-transparent">
-              Academic ACE Grader
-            </h1>
-          </div>
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon">
-              <HelpCircle className="w-5 h-5" />
-            </Button>
+          <h1 className="text-2xl font-bold bg-gradient-primary bg-clip-text text-transparent">
+            Academic ACE Grader
+          </h1>
+          <div className="flex items-center gap-2">
             <Button variant="ghost" size="icon">
               <Settings className="w-5 h-5" />
             </Button>
@@ -102,7 +86,7 @@ const Dashboard = () => {
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-8">
+      <div className="container mx-auto px-4 py-8 max-w-6xl">
         {/* Welcome Banner */}
         <div
           className="relative rounded-2xl overflow-hidden mb-8 shadow-elegant"
@@ -117,92 +101,74 @@ const Dashboard = () => {
               Welcome back, {user?.email?.split("@")[0]}! 👋
             </h2>
             <p className="text-lg opacity-90">
-              Ready to grade some papers? Let's get started.
+              Upload rubrics, select focus criteria, and let AI grade your papers.
             </p>
           </div>
         </div>
 
-        {/* At-A-Glance Cards */}
-        <div className="grid md:grid-cols-3 gap-6 mb-8">
-          {stats.map((stat, index) => (
-            <Card
-              key={index}
-              className="p-6 shadow-card hover:shadow-elegant transition-shadow"
-            >
-              <div className="flex items-start gap-4">
-                <div
-                  className={`p-3 rounded-lg bg-${stat.color}/10`}
-                >
-                  <stat.icon className={`w-6 h-6 text-${stat.color}`} />
-                </div>
-                <div className="flex-1">
-                  <h3 className="font-semibold text-card-foreground mb-1">
-                    {stat.title}
-                  </h3>
-                  <p className="text-3xl font-bold text-card-foreground mb-1">
-                    {stat.value}
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    {stat.description}
-                  </p>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-
-        {/* Primary Actions */}
-        <div className="max-w-2xl mx-auto text-center space-y-6 mb-12">
-          <Button
-            size="lg"
-            className="bg-gradient-primary text-primary-foreground hover:opacity-90 shadow-elegant text-lg px-8 py-6"
-          >
-            <Upload className="w-5 h-5 mr-2" />
-            Upload Papers to Grade
-          </Button>
-          <div>
-            <Button variant="ghost" className="text-muted-foreground">
-              or <span className="underline ml-1">Upload a New Rubric</span>
-            </Button>
-          </div>
-        </div>
-
-        {/* Quick Access - Empty State */}
-        <div>
-          <h2 className="text-2xl font-bold mb-6 text-foreground">
-            Your Subjects
-          </h2>
-          <Card className="p-12 text-center shadow-card">
-            <div className="max-w-md mx-auto space-y-4">
-              <div className="w-20 h-20 mx-auto rounded-full bg-muted flex items-center justify-center">
-                <BookOpen className="w-10 h-10 text-muted-foreground" />
-              </div>
-              <h3 className="text-xl font-semibold text-card-foreground">
-                No subjects yet
-              </h3>
-              <p className="text-muted-foreground">
-                Create your first subject to organize rubrics and assignments
+        {/* Main Action Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <Card className="hover:shadow-lg transition-shadow">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="h-5 w-5 text-primary" />
+                Rubrics
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-3xl font-bold">{stats.rubrics}</div>
+              <p className="text-sm text-muted-foreground">
+                Upload rubrics and AI will extract grading criteria
               </p>
-              <Button className="mt-4">
-                <BookOpen className="w-4 h-4 mr-2" />
-                Create Subject
+              <RubricUpload onSuccess={refreshStats} />
+            </CardContent>
+          </Card>
+
+          <Card className="hover:shadow-lg transition-shadow">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5 text-primary" />
+                Upload Papers
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-3xl font-bold">{stats.pendingSubmissions}</div>
+              <p className="text-sm text-muted-foreground">
+                Drop student papers and let AI grade them
+              </p>
+              <PaperUpload onSuccess={refreshStats} />
+            </CardContent>
+          </Card>
+
+          <Card 
+            className="hover:shadow-lg transition-shadow cursor-pointer"
+            onClick={() => navigate("/results")}
+          >
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <GraduationCap className="h-5 w-5 text-primary" />
+                Results
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-3xl font-bold">{stats.results}</div>
+              <p className="text-sm text-muted-foreground">
+                View detailed grading results and feedback
+              </p>
+              <Button variant="outline" size="lg" className="w-full">
+                View Results
               </Button>
-            </div>
+            </CardContent>
           </Card>
         </div>
 
-        {/* Bottom Navigation Hint */}
-        <div className="mt-12 text-center">
-          <p className="text-sm text-muted-foreground">
-            Navigate using the menu above to access{" "}
-            <span className="font-medium">Subjects</span>,{" "}
-            <span className="font-medium">Assignments</span>, and{" "}
-            <span className="font-medium">Results</span>
-          </p>
-        </div>
+        <FocusSelector
+          rubricId={selectedRubricId}
+          open={focusSelectorOpen}
+          onOpenChange={setFocusSelectorOpen}
+          onSuccess={refreshStats}
+        />
       </div>
     </div>
   );
-};
-
-export default Dashboard;
+}

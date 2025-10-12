@@ -1,1 +1,7 @@
 project_id = "yykgeretpltwzxxxtqnh"
+
+[functions.process-rubric]
+verify_jwt = true
+
+[functions.grade-submission]
+verify_jwt = true
