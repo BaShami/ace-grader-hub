@@ -10,6 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 interface PaperUploadProps {
   onSuccess?: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  preSelectedSubjectId?: string;
 }
 
 interface FileWithMeta {
@@ -18,8 +21,11 @@ interface FileWithMeta {
   id: string;
 }
 
-export function PaperUpload({ onSuccess }: PaperUploadProps) {
-  const [open, setOpen] = useState(false);
+export function PaperUpload({ onSuccess, open: controlledOpen, onOpenChange, preSelectedSubjectId }: PaperUploadProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
+  const setOpen = onOpenChange || setInternalOpen;
+  
   const [files, setFiles] = useState<FileWithMeta[]>([]);
   const [rubrics, setRubrics] = useState<any[]>([]);
   const [focusProfiles, setFocusProfiles] = useState<any[]>([]);
@@ -35,13 +41,22 @@ export function PaperUpload({ onSuccess }: PaperUploadProps) {
     if (selectedRubric) loadFocusProfiles();
   }, [selectedRubric]);
 
+  useEffect(() => {
+    if (preSelectedSubjectId && rubrics.length > 0) {
+      const subjectRubrics = rubrics.filter(r => r.subject_id === preSelectedSubjectId);
+      if (subjectRubrics.length > 0) {
+        setSelectedRubric(subjectRubrics[0].id);
+      }
+    }
+  }, [preSelectedSubjectId, rubrics]);
+
   const loadRubrics = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
     const { data, error } = await supabase
       .from("rubrics")
-      .select("*")
+      .select("*, subjects(name)")
       .eq("user_id", user.id);
     
     if (!error && data) setRubrics(data);

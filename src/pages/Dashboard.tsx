@@ -6,8 +6,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Settings, LogOut, FileText, Upload, GraduationCap, Loader2 } from "lucide-react";
 import { RubricUpload } from "@/components/RubricUpload";
 import { PaperUpload } from "@/components/PaperUpload";
-import { FocusSelector } from "@/components/FocusSelector";
+import { SubjectCard } from "@/components/SubjectCard";
 import heroGrading from "@/assets/hero-grading.jpg";
+
+interface Subject {
+  id: string;
+  name: string;
+  color: string;
+  user_id: string;
+}
+
+interface Rubric {
+  id: string;
+  name: string;
+  subject_id: string;
+  criteria: any;
+  created_at: string;
+}
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -18,12 +33,40 @@ export default function Dashboard() {
     pendingSubmissions: 0,
     results: 0
   });
-  const [focusSelectorOpen, setFocusSelectorOpen] = useState(false);
-  const [selectedRubricId, setSelectedRubricId] = useState("");
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [rubrics, setRubrics] = useState<Rubric[]>([]);
 
   useEffect(() => {
     checkUser();
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      loadStats(user.id);
+      loadSubjectsAndRubrics();
+      
+      // Set up realtime subscription for rubric updates
+      const channel = supabase
+        .channel('rubrics-changes')
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'rubrics',
+            filter: `user_id=eq.${user.id}`
+          },
+          () => {
+            loadSubjectsAndRubrics();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
+  }, [user]);
 
   const checkUser = async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -50,13 +93,37 @@ export default function Dashboard() {
     });
   };
 
+  const loadSubjectsAndRubrics = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const [subjectsData, rubricsData] = await Promise.all([
+      supabase
+        .from("subjects")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("rubrics")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+    ]);
+
+    if (subjectsData.data) setSubjects(subjectsData.data);
+    if (rubricsData.data) setRubrics(rubricsData.data);
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     navigate("/");
   };
 
   const refreshStats = () => {
-    if (user) loadStats(user.id);
+    if (user) {
+      loadStats(user.id);
+      loadSubjectsAndRubrics();
+    }
   };
 
   if (loading) {
@@ -107,7 +174,7 @@ export default function Dashboard() {
         </div>
 
         {/* Main Action Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
           <Card className="hover:shadow-lg transition-shadow">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -134,7 +201,7 @@ export default function Dashboard() {
             <CardContent className="space-y-4">
               <div className="text-3xl font-bold">{stats.pendingSubmissions}</div>
               <p className="text-sm text-muted-foreground">
-                Drop student papers and let AI grade them
+                Select a subject below or upload directly
               </p>
               <PaperUpload onSuccess={refreshStats} />
             </CardContent>
@@ -162,12 +229,30 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        <FocusSelector
-          rubricId={selectedRubricId}
-          open={focusSelectorOpen}
-          onOpenChange={setFocusSelectorOpen}
-          onSuccess={refreshStats}
-        />
+        {/* Subjects Section */}
+        {subjects.length > 0 && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold">Your Subjects</h2>
+              <p className="text-sm text-muted-foreground">
+                Click on a subject to upload papers
+              </p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {subjects.map((subject) => {
+                const subjectRubrics = rubrics.filter(r => r.subject_id === subject.id);
+                return (
+                  <SubjectCard
+                    key={subject.id}
+                    subject={subject}
+                    rubrics={subjectRubrics}
+                    onRefresh={refreshStats}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
