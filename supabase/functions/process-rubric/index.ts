@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
+import * as path from "https://deno.land/std@0.168.0/path/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -29,6 +30,16 @@ type Criterion = z.infer<typeof criterionSchema>;
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
+// Generic error messages to avoid information leakage
+const ERROR_MESSAGES = {
+  AUTH_FAILED: 'Authentication required',
+  NOT_FOUND: 'Resource not found',
+  INVALID_INPUT: 'Invalid request',
+  PROCESSING_FAILED: 'Processing failed',
+  AI_ERROR: 'Service temporarily unavailable',
+  FILE_TOO_LARGE: 'File size exceeds limit'
+};
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -47,7 +58,7 @@ serve(async (req) => {
     const authHeader = req.headers.get('authorization');
     if (!authHeader) {
       return new Response(
-        JSON.stringify({ error: 'Authentication required' }),
+        JSON.stringify({ error: ERROR_MESSAGES.AUTH_FAILED }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -67,9 +78,9 @@ serve(async (req) => {
       .single();
 
     if (rubricError || !rubric) {
-      console.error('[process-rubric] Authorization failed:', rubricError);
+      console.error('[process-rubric] Authorization failed:', { rubricId, error: rubricError?.message });
       return new Response(
-        JSON.stringify({ error: 'Rubric not found or access denied' }),
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -80,25 +91,50 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    // Download the rubric file with size validation
+    // Check file metadata before downloading (prevents resource exhaustion)
+    const dirPath = path.dirname(filePath);
+    const fileName = path.basename(filePath);
+    
+    const { data: fileList, error: listError } = await serviceClient.storage
+      .from('rubrics')
+      .list(dirPath, { search: fileName });
+
+    if (listError || !fileList) {
+      console.error('[process-rubric] Error listing file:', { error: listError?.message });
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const fileInfo = fileList.find(f => f.name === fileName);
+    if (!fileInfo) {
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Check size before download to prevent bandwidth waste
+    const fileSize = (fileInfo.metadata as any)?.size || 0;
+    if (fileSize > MAX_FILE_SIZE) {
+      console.error('[process-rubric] File too large:', { size: fileSize, limit: MAX_FILE_SIZE });
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.FILE_TOO_LARGE }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Now safe to download the file
     const { data: fileData, error: downloadError } = await serviceClient.storage
       .from('rubrics')
       .download(filePath);
 
     if (downloadError) {
-      console.error('[process-rubric] Storage download failed:', downloadError);
+      console.error('[process-rubric] Storage download failed:', { error: downloadError?.message });
       return new Response(
-        JSON.stringify({ error: 'Failed to download rubric file' }),
+        JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Validate file size
-    if (fileData.size > MAX_FILE_SIZE) {
-      console.error('[process-rubric] File too large:', fileData.size);
-      return new Response(
-        JSON.stringify({ error: 'File size exceeds 5MB limit' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -106,9 +142,9 @@ serve(async (req) => {
     
     // Validate text length
     if (fileText.length > 100000) {
-      console.error('[process-rubric] Text too long:', fileText.length);
+      console.error('[process-rubric] Text exceeds limit');
       return new Response(
-        JSON.stringify({ error: 'File content exceeds maximum length' }),
+        JSON.stringify({ error: ERROR_MESSAGES.INVALID_INPUT }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -171,25 +207,24 @@ serve(async (req) => {
     });
 
     if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error('[process-rubric] AI Error:', aiResponse.status, errorText);
+      console.error('[process-rubric] AI API error:', { status: aiResponse.status });
       
       if (aiResponse.status === 429) {
         return new Response(
-          JSON.stringify({ error: 'AI service rate limit exceeded. Please try again later.' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       
       if (aiResponse.status === 402) {
         return new Response(
-          JSON.stringify({ error: 'AI service payment required. Please contact support.' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       
       return new Response(
-        JSON.stringify({ error: 'AI processing failed. Please try again.' }),
+        JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -206,9 +241,9 @@ serve(async (req) => {
         const validated = aiResponseSchema.parse(parsedArgs);
         criteria = validated.criteria;
       } catch (validationError) {
-        console.error('[process-rubric] AI response validation failed:', validationError);
+        console.error('[process-rubric] AI response validation failed');
         return new Response(
-          JSON.stringify({ error: 'Invalid AI response format' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
@@ -221,9 +256,9 @@ serve(async (req) => {
       .eq('id', rubricId);
 
     if (updateError) {
-      console.error('[process-rubric] Database update failed:', updateError);
+      console.error('[process-rubric] Database update failed:', { error: updateError?.message });
       return new Response(
-        JSON.stringify({ error: 'Failed to save rubric criteria' }),
+        JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -242,7 +277,7 @@ serve(async (req) => {
       });
 
     if (profileError) {
-      console.error('[process-rubric] Failed to create focus profile:', profileError);
+      console.error('[process-rubric] Failed to create focus profile:', { error: profileError?.message });
       // Non-fatal error, continue
     }
 
@@ -251,25 +286,19 @@ serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error: any) {
-    console.error('[process-rubric] Error:', error);
+    console.error('[process-rubric] Error:', { name: error.name, message: error.message });
     
     // Handle validation errors
     if (error.name === 'ZodError') {
       return new Response(
-        JSON.stringify({ 
-          error: 'Invalid input parameters',
-          code: 'VALIDATION_ERROR'
-        }),
+        JSON.stringify({ error: ERROR_MESSAGES.INVALID_INPUT }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
     // Generic error response
     return new Response(
-      JSON.stringify({ 
-        error: 'Failed to process rubric. Please try again.',
-        code: 'PROCESSING_ERROR'
-      }),
+      JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }

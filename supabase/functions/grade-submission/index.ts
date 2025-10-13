@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
+import * as path from "https://deno.land/std@0.168.0/path/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -30,6 +31,16 @@ const aiGradingResponseSchema = z.object({
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_TEXT_LENGTH = 200000; // 200k chars - more reasonable for academic papers
 
+// Generic error messages to avoid information leakage
+const ERROR_MESSAGES = {
+  AUTH_FAILED: 'Authentication required',
+  NOT_FOUND: 'Resource not found',
+  INVALID_INPUT: 'Invalid request',
+  PROCESSING_FAILED: 'Processing failed',
+  AI_ERROR: 'Service temporarily unavailable',
+  FILE_TOO_LARGE: 'File size exceeds limit'
+};
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -49,7 +60,7 @@ serve(async (req) => {
     const authHeader = req.headers.get('authorization');
     if (!authHeader) {
       return new Response(
-        JSON.stringify({ error: 'Authentication required' }),
+        JSON.stringify({ error: ERROR_MESSAGES.AUTH_FAILED }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -69,9 +80,9 @@ serve(async (req) => {
       .single();
 
     if (submissionError || !submission) {
-      console.error('[grade-submission] Authorization failed:', submissionError);
+      console.error('[grade-submission] Authorization failed:', { submissionId, error: submissionError?.message });
       return new Response(
-        JSON.stringify({ error: 'Submission not found or access denied' }),
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -96,14 +107,14 @@ serve(async (req) => {
       .single();
 
     if (focusError || !focusProfile) {
-      console.error('[grade-submission] Focus profile not found:', focusError);
+      console.error('[grade-submission] Focus profile not found:', { focusProfileId, error: focusError?.message });
       await serviceClient
         .from('submissions')
         .update({ status: 'error' })
         .eq('id', submissionId);
       
       return new Response(
-        JSON.stringify({ error: 'Focus profile not found or access denied' }),
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -116,14 +127,14 @@ serve(async (req) => {
       .single();
 
     if (rubricError || !rubric) {
-      console.error('[grade-submission] Rubric not found:', rubricError);
+      console.error('[grade-submission] Rubric not found:', { error: rubricError?.message });
       await serviceClient
         .from('submissions')
         .update({ status: 'error' })
         .eq('id', submissionId);
       
       return new Response(
-        JSON.stringify({ error: 'Rubric not found or access denied' }),
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -134,35 +145,70 @@ serve(async (req) => {
       (focusProfile.selected_criteria as string[]).includes(c.id)
     );
 
-    // Download the submission file with size validation
+    // Check file metadata before downloading (prevents resource exhaustion)
+    const dirPath = path.dirname(submission.file_path);
+    const fileName = path.basename(submission.file_path);
+    
+    const { data: fileList, error: listError } = await serviceClient.storage
+      .from('submissions')
+      .list(dirPath, { search: fileName });
+
+    if (listError || !fileList) {
+      console.error('[grade-submission] Error listing file:', { error: listError?.message });
+      await serviceClient
+        .from('submissions')
+        .update({ status: 'error' })
+        .eq('id', submissionId);
+      
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const fileInfo = fileList.find((f: any) => f.name === fileName);
+    if (!fileInfo) {
+      await serviceClient
+        .from('submissions')
+        .update({ status: 'error' })
+        .eq('id', submissionId);
+      
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Check size before download to prevent bandwidth waste
+    const fileSize = (fileInfo.metadata as any)?.size || 0;
+    if (fileSize > MAX_FILE_SIZE) {
+      console.error('[grade-submission] File too large:', { size: fileSize, limit: MAX_FILE_SIZE });
+      await serviceClient
+        .from('submissions')
+        .update({ status: 'error' })
+        .eq('id', submissionId);
+      
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.FILE_TOO_LARGE }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Now safe to download the file
     const { data: fileData, error: downloadError } = await serviceClient.storage
       .from('submissions')
       .download(submission.file_path);
 
     if (downloadError) {
-      console.error('[grade-submission] Storage download failed:', downloadError);
+      console.error('[grade-submission] Storage download failed:', { error: downloadError?.message });
       await serviceClient
         .from('submissions')
         .update({ status: 'error' })
         .eq('id', submissionId);
       
       return new Response(
-        JSON.stringify({ error: 'Failed to download submission file' }),
+        JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Validate file size
-    if (fileData.size > MAX_FILE_SIZE) {
-      console.error('[grade-submission] File too large:', fileData.size);
-      await serviceClient
-        .from('submissions')
-        .update({ status: 'error' })
-        .eq('id', submissionId);
-      
-      return new Response(
-        JSON.stringify({ error: 'File size exceeds 10MB limit' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -171,7 +217,7 @@ serve(async (req) => {
     // Intelligently truncate if text is too long
     let processedText = submissionText;
     if (submissionText.length > MAX_TEXT_LENGTH) {
-      console.log('[grade-submission] Text too long, truncating intelligently:', submissionText.length);
+      console.log('[grade-submission] Text exceeds limit, truncating');
       
       // Keep first 60% and last 20% of the text to preserve intro and conclusion
       const keepFirst = Math.floor(MAX_TEXT_LENGTH * 0.7);
@@ -181,8 +227,6 @@ serve(async (req) => {
       const lastPart = submissionText.substring(submissionText.length - keepLast);
       
       processedText = firstPart + '\n\n[... middle section truncated due to length ...]\n\n' + lastPart;
-      
-      console.log('[grade-submission] Truncated to:', processedText.length);
     }
 
     // Call Lovable AI to grade
@@ -256,8 +300,7 @@ serve(async (req) => {
     });
 
     if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error('[grade-submission] AI Error:', aiResponse.status, errorText);
+      console.error('[grade-submission] AI API error:', { status: aiResponse.status });
       
       await serviceClient
         .from('submissions')
@@ -266,20 +309,20 @@ serve(async (req) => {
       
       if (aiResponse.status === 429) {
         return new Response(
-          JSON.stringify({ error: 'AI service rate limit exceeded. Please try again later.' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       
       if (aiResponse.status === 402) {
         return new Response(
-          JSON.stringify({ error: 'AI service payment required. Please contact support.' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       
       return new Response(
-        JSON.stringify({ error: 'AI grading failed. Please try again.' }),
+        JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -295,14 +338,14 @@ serve(async (req) => {
       try {
         gradingResult = aiGradingResponseSchema.parse(rawResult);
       } catch (validationError) {
-        console.error('[grade-submission] AI response validation failed:', validationError);
+        console.error('[grade-submission] AI response validation failed');
         await serviceClient
           .from('submissions')
           .update({ status: 'error' })
           .eq('id', submissionId);
         
         return new Response(
-          JSON.stringify({ error: 'Invalid AI grading response format' }),
+          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
           { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
@@ -314,7 +357,7 @@ serve(async (req) => {
         .eq('id', submissionId);
       
       return new Response(
-        JSON.stringify({ error: 'Invalid AI response format' }),
+        JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -339,14 +382,14 @@ serve(async (req) => {
       });
 
     if (resultError) {
-      console.error('[grade-submission] Failed to store results:', resultError);
+      console.error('[grade-submission] Failed to store results:', { error: resultError?.message });
       await serviceClient
         .from('submissions')
         .update({ status: 'error' })
         .eq('id', submissionId);
       
       return new Response(
-        JSON.stringify({ error: 'Failed to store grading results' }),
+        JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -362,7 +405,7 @@ serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error: any) {
-    console.error('[grade-submission] Error:', error);
+    console.error('[grade-submission] Error:', { name: error.name, message: error.message });
     
     // Update submission status to error if we have the ID
     if (submissionId && serviceClient) {
@@ -371,28 +414,22 @@ serve(async (req) => {
           .from('submissions')
           .update({ status: 'error' })
           .eq('id', submissionId);
-      } catch (updateError) {
-        console.error('[grade-submission] Failed to update error status:', updateError);
+      } catch (updateError: any) {
+        console.error('[grade-submission] Failed to update error status:', { error: updateError?.message });
       }
     }
     
     // Handle validation errors
     if (error.name === 'ZodError') {
       return new Response(
-        JSON.stringify({ 
-          error: 'Invalid input parameters',
-          code: 'VALIDATION_ERROR'
-        }),
+        JSON.stringify({ error: ERROR_MESSAGES.INVALID_INPUT }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
     // Generic error response
     return new Response(
-      JSON.stringify({ 
-        error: 'Failed to grade submission. Please try again.',
-        code: 'GRADING_ERROR'
-      }),
+      JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
