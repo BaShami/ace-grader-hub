@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { ArrowLeft, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { RetryGradingButton } from "@/components/RetryGradingButton";
 
@@ -67,6 +68,7 @@ export default function Results() {
           student_name, 
           status, 
           created_at,
+          file_path,
           assignment_id,
           assignments!inner(focus_profile_id)
         `)
@@ -78,6 +80,28 @@ export default function Results() {
       setPendingSubmissions(data || []);
     } catch (error: any) {
       console.error("Load pending submissions error:", error);
+    }
+  };
+
+  const handleDeleteSubmission = async (submissionId: string, filePath: string) => {
+    try {
+      // Delete file from storage
+      if (filePath) {
+        await supabase.storage.from('submissions').remove([filePath]);
+      }
+
+      // Delete any associated result
+      await supabase.from('results').delete().eq('submission_id', submissionId);
+
+      // Delete submission
+      await supabase.from('submissions').delete().eq('id', submissionId);
+
+      toast.success("Paper deleted successfully");
+      loadPendingSubmissions();
+      loadResults();
+    } catch (error: any) {
+      console.error("Delete submission error:", error);
+      toast.error("Failed to delete paper");
     }
   };
 
@@ -137,14 +161,40 @@ export default function Results() {
                           {submission.status === 'error' ? 'Failed' : 'Processing...'}
                         </Badge>
                         {submission.status === 'error' && (
-                          <RetryGradingButton
-                            submissionId={submission.id}
-                            focusProfileId={(submission.assignments as any)?.focus_profile_id}
-                            onSuccess={() => {
-                              loadPendingSubmissions();
-                              loadResults();
-                            }}
-                          />
+                          <>
+                            <RetryGradingButton
+                              submissionId={submission.id}
+                              focusProfileId={(submission.assignments as any)?.focus_profile_id}
+                              onSuccess={() => {
+                                loadPendingSubmissions();
+                                loadResults();
+                              }}
+                            />
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button variant="ghost" size="sm">
+                                  <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>Delete Failed Paper?</AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    This will permanently delete "{submission.student_name}" and cannot be undone.
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                  <AlertDialogAction 
+                                    onClick={() => handleDeleteSubmission(submission.id, submission.file_path)}
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                  >
+                                    Delete
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          </>
                         )}
                       </div>
                     </div>
