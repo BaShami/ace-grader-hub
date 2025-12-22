@@ -77,6 +77,7 @@ serve(async (req) => {
   }
 
   let rubricId: string | undefined;
+  let serviceClient: any;
 
   try {
     // Validate input
@@ -101,6 +102,39 @@ serve(async (req) => {
       { global: { headers: { Authorization: authHeader } } }
     );
 
+    // Get user ID from JWT for rate limiting
+    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    if (userError || !user) {
+      console.error('[process-rubric] Failed to get user:', userError?.message);
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.AUTH_FAILED }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Create service client for rate limiting and other operations
+    serviceClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    // Check rate limit (10 requests per minute for rubric processing)
+    const { data: withinLimit, error: rateLimitError } = await serviceClient.rpc('check_rate_limit', {
+      p_user_id: user.id,
+      p_endpoint: 'process-rubric',
+      p_max_requests: 10
+    });
+
+    if (rateLimitError) {
+      console.error('[process-rubric] Rate limit check failed:', rateLimitError.message);
+    } else if (!withinLimit) {
+      console.log('[process-rubric] Rate limit exceeded for user:', user.id);
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Please wait a minute before trying again.' }),
+        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // Verify ownership - use user client to respect RLS
     const { data: rubric, error: rubricError } = await userClient
       .from('rubrics')
@@ -116,11 +150,7 @@ serve(async (req) => {
       );
     }
 
-    // Create service client only after ownership verification
-    const serviceClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    );
+    // serviceClient already created above for rate limiting
 
     // Check file metadata before downloading (prevents resource exhaustion)
     const dirPath = path.dirname(filePath);
@@ -138,7 +168,7 @@ serve(async (req) => {
       );
     }
 
-    const fileInfo = fileList.find(f => f.name === fileName);
+    const fileInfo = fileList.find((f: any) => f.name === fileName);
     if (!fileInfo) {
       return new Response(
         JSON.stringify({ error: ERROR_MESSAGES.NOT_FOUND }),
