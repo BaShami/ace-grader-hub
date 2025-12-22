@@ -138,7 +138,78 @@ serve(async (req) => {
       );
     }
 
-    const fileText = await fileData.text();
+    // Determine file type and extract text accordingly
+    const fileExtension = path.extname(filePath).toLowerCase();
+    let fileText: string;
+
+    if (fileExtension === '.txt' || fileExtension === '.md') {
+      // Plain text files can be read directly
+      fileText = await fileData.text();
+      console.log('[process-rubric] Read plain text file, length:', fileText.length);
+    } else {
+      // For PDF and DOCX, use Lovable AI vision to extract text
+      console.log('[process-rubric] Using AI vision to extract text from:', fileExtension);
+      
+      const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+      if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+
+      // Convert file to base64
+      const arrayBuffer = await fileData.arrayBuffer();
+      const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+      
+      // Determine MIME type
+      let mimeType = 'application/octet-stream';
+      if (fileExtension === '.pdf') mimeType = 'application/pdf';
+      else if (fileExtension === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      
+      const extractionResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-pro',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Extract ALL text content from this rubric document. Return ONLY the extracted text, preserving the original structure and formatting. Include all grading criteria, point values, and descriptions exactly as written.'
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${mimeType};base64,${base64Data}`
+                  }
+                }
+              ]
+            }
+          ]
+        }),
+      });
+
+      if (!extractionResponse.ok) {
+        console.error('[process-rubric] Text extraction failed:', { status: extractionResponse.status });
+        return new Response(
+          JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const extractionData = await extractionResponse.json();
+      fileText = extractionData.choices?.[0]?.message?.content || '';
+      console.log('[process-rubric] Extracted text from document, length:', fileText.length);
+      
+      if (!fileText || fileText.length < 20) {
+        console.error('[process-rubric] Insufficient text extracted from document');
+        return new Response(
+          JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
     
     // Validate text length
     if (fileText.length > 100000) {
