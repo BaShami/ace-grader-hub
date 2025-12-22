@@ -2,6 +2,37 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 import * as path from "https://deno.land/std@0.168.0/path/mod.ts";
+import { ZipReader, BlobReader, TextWriter } from "https://deno.land/x/zipjs@v2.7.32/index.js";
+
+// Helper function to extract text from DOCX
+async function extractTextFromDocx(fileData: Blob): Promise<string> {
+  try {
+    const zipReader = new ZipReader(new BlobReader(fileData));
+    const entries = await zipReader.getEntries();
+    
+    // Find the main document content
+    const documentEntry = entries.find(e => e.filename === 'word/document.xml');
+    if (!documentEntry) {
+      throw new Error('No document.xml found in DOCX');
+    }
+    
+    const textWriter = new TextWriter();
+    const xmlContent = await documentEntry.getData!(textWriter);
+    await zipReader.close();
+    
+    // Parse XML and extract text - add paragraph breaks where there are paragraph markers
+    const withParagraphs = xmlContent
+      .replace(/<\/w:p>/g, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    return withParagraphs;
+  } catch (error) {
+    console.error('[process-rubric] DOCX extraction error:', error);
+    throw error;
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -146,9 +177,22 @@ serve(async (req) => {
       // Plain text files can be read directly
       fileText = await fileData.text();
       console.log('[process-rubric] Read plain text file, length:', fileText.length);
-    } else {
-      // For PDF and DOCX, use Lovable AI vision to extract text
-      console.log('[process-rubric] Using AI vision to extract text from:', fileExtension);
+    } else if (fileExtension === '.docx') {
+      // Parse DOCX files by extracting XML content
+      console.log('[process-rubric] Parsing DOCX file');
+      try {
+        fileText = await extractTextFromDocx(fileData);
+        console.log('[process-rubric] Extracted text from DOCX, length:', fileText.length);
+      } catch (docxError) {
+        console.error('[process-rubric] DOCX parsing failed:', docxError);
+        return new Response(
+          JSON.stringify({ error: 'Could not parse DOCX file. Please ensure the file is valid.' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    } else if (fileExtension === '.pdf') {
+      // For PDF files, use AI vision to extract text
+      console.log('[process-rubric] Using AI vision to extract text from PDF');
       
       const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
       if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
@@ -156,11 +200,6 @@ serve(async (req) => {
       // Convert file to base64
       const arrayBuffer = await fileData.arrayBuffer();
       const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-      
-      // Determine MIME type
-      let mimeType = 'application/octet-stream';
-      if (fileExtension === '.pdf') mimeType = 'application/pdf';
-      else if (fileExtension === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       
       const extractionResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
         method: 'POST',
@@ -176,12 +215,12 @@ serve(async (req) => {
               content: [
                 {
                   type: 'text',
-                  text: 'Extract ALL text content from this rubric document. Return ONLY the extracted text, preserving the original structure and formatting. Include all grading criteria, point values, and descriptions exactly as written.'
+                  text: 'Extract ALL text content from this PDF rubric document. Return ONLY the extracted text, preserving the original structure and formatting. Include all grading criteria, point values, and descriptions exactly as written.'
                 },
                 {
                   type: 'image_url',
                   image_url: {
-                    url: `data:${mimeType};base64,${base64Data}`
+                    url: `data:application/pdf;base64,${base64Data}`
                   }
                 }
               ]
@@ -191,7 +230,7 @@ serve(async (req) => {
       });
 
       if (!extractionResponse.ok) {
-        console.error('[process-rubric] Text extraction failed:', { status: extractionResponse.status });
+        console.error('[process-rubric] PDF text extraction failed:', { status: extractionResponse.status });
         return new Response(
           JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
           { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -200,15 +239,22 @@ serve(async (req) => {
 
       const extractionData = await extractionResponse.json();
       fileText = extractionData.choices?.[0]?.message?.content || '';
-      console.log('[process-rubric] Extracted text from document, length:', fileText.length);
-      
-      if (!fileText || fileText.length < 20) {
-        console.error('[process-rubric] Insufficient text extracted from document');
-        return new Response(
-          JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
+      console.log('[process-rubric] Extracted text from PDF, length:', fileText.length);
+    } else {
+      // Unsupported file type
+      console.error('[process-rubric] Unsupported file type:', fileExtension);
+      return new Response(
+        JSON.stringify({ error: 'Unsupported file type. Please upload PDF, DOCX, or TXT files.' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!fileText || fileText.length < 20) {
+      console.error('[process-rubric] Insufficient text extracted from document');
+      return new Response(
+        JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
     
     // Validate text length
