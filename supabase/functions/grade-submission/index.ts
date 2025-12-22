@@ -212,7 +212,88 @@ serve(async (req) => {
       );
     }
 
-    const submissionText = await fileData.text();
+    // Determine file type and extract text accordingly
+    const fileExtension = path.extname(submission.file_path).toLowerCase();
+    let submissionText: string;
+
+    if (fileExtension === '.txt' || fileExtension === '.md') {
+      // Plain text files can be read directly
+      submissionText = await fileData.text();
+      console.log('[grade-submission] Read plain text file, length:', submissionText.length);
+    } else {
+      // For PDF and DOCX, use Lovable AI vision to extract text
+      console.log('[grade-submission] Using AI vision to extract text from:', fileExtension);
+      
+      const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+      if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+
+      // Convert file to base64
+      const arrayBuffer = await fileData.arrayBuffer();
+      const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+      
+      // Determine MIME type
+      let mimeType = 'application/octet-stream';
+      if (fileExtension === '.pdf') mimeType = 'application/pdf';
+      else if (fileExtension === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      
+      const extractionResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-pro',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Extract ALL text content from this document. Return ONLY the extracted text, preserving the original structure and formatting as much as possible. Do not summarize or interpret - just extract the complete text verbatim.'
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${mimeType};base64,${base64Data}`
+                  }
+                }
+              ]
+            }
+          ]
+        }),
+      });
+
+      if (!extractionResponse.ok) {
+        console.error('[grade-submission] Text extraction failed:', { status: extractionResponse.status });
+        await serviceClient
+          .from('submissions')
+          .update({ status: 'error' })
+          .eq('id', submissionId);
+        
+        return new Response(
+          JSON.stringify({ error: ERROR_MESSAGES.PROCESSING_FAILED }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const extractionData = await extractionResponse.json();
+      submissionText = extractionData.choices?.[0]?.message?.content || '';
+      console.log('[grade-submission] Extracted text from document, length:', submissionText.length);
+      
+      if (!submissionText || submissionText.length < 50) {
+        console.error('[grade-submission] Insufficient text extracted from document');
+        await serviceClient
+          .from('submissions')
+          .update({ status: 'error' })
+          .eq('id', submissionId);
+        
+        return new Response(
+          JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
     
     // Intelligently truncate if text is too long
     let processedText = submissionText;
@@ -234,8 +315,10 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
     const criteriaContext = selectedCriteria.map(c => 
-      `${c.name} (${c.weight} points): ${c.description}`
+      `- ${c.name} (Max ${c.weight} points): ${c.description}`
     ).join('\n');
+
+    const totalMaxPoints = selectedCriteria.reduce((sum, c) => sum + c.weight, 0);
 
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -248,11 +331,51 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert teacher grading student work. Grade ONLY based on the provided criteria. For each criterion, provide a score (0 to max points), rationale (2-3 sentences), and relevant evidence quotes from the text.`
+            content: `You are an experienced teacher providing detailed, constructive feedback on student work. Your goal is to help students understand exactly what they did well and what they need to improve.
+
+GRADING INSTRUCTIONS:
+1. Read the entire submission carefully before scoring.
+2. For EACH criterion, you MUST:
+   - Assign a score from 0 to the maximum points for that criterion
+   - Write a specific rationale explaining WHY you gave that score (not generic statements)
+   - Quote 2-3 specific passages from the student's work as evidence (use exact quotes with quotation marks)
+   
+3. Your rationale should reference SPECIFIC parts of the submission. Avoid vague statements like "good work" or "needs improvement."
+
+4. For evidence, copy EXACT quotes from the student text that support your score. These quotes prove your assessment is based on the actual content.
+
+5. Strengths should highlight specific things the student did well with examples.
+
+6. Improvements should be actionable - tell the student exactly what to do differently next time.
+
+SCORING GUIDELINES:
+- Full points (90-100%): Exceeds expectations, demonstrates mastery
+- Most points (70-89%): Meets expectations with minor issues
+- Half points (50-69%): Partially meets expectations, significant gaps
+- Few points (25-49%): Below expectations, major issues
+- Minimal points (0-24%): Does not meet expectations`
           },
           {
             role: 'user',
-            content: `Rubric: ${rubric.name}\n\nFocus on these criteria ONLY:\n${criteriaContext}\n\nStudent submission:\n${processedText}\n\nProvide scores, rationale, and evidence for each criterion. Also identify 2-3 key strengths and 2-3 areas for improvement.`
+            content: `RUBRIC: ${rubric.name}
+TOTAL POSSIBLE POINTS: ${totalMaxPoints}
+
+GRADING CRITERIA (grade ONLY these):
+${criteriaContext}
+
+---
+STUDENT SUBMISSION:
+---
+${processedText}
+---
+
+Grade this submission using the criteria above. For each criterion:
+1. Use the criterion's id field as the criterion_id
+2. Score from 0 to the max points listed
+3. Explain your score with specific references to the student's work
+4. Include 2-3 direct quotes from the submission as evidence
+
+Then identify 2-3 specific strengths (things done well with examples) and 2-3 specific areas for improvement (actionable suggestions).`
           }
         ],
         tools: [

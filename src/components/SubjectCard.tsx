@@ -1,16 +1,30 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Upload, FileText, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Upload, FileText, Loader2, CheckCircle2, AlertCircle, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { PaperUpload } from "./PaperUpload";
 import { FocusSelector } from "./FocusSelector";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 interface Rubric {
   id: string;
   name: string;
   criteria: any;
   created_at: string;
+  file_path?: string | null;
 }
 
 interface SubjectCardProps {
@@ -27,10 +41,109 @@ export function SubjectCard({ subject, rubrics, onRefresh }: SubjectCardProps) {
   const [paperUploadOpen, setPaperUploadOpen] = useState(false);
   const [focusSelectorOpen, setFocusSelectorOpen] = useState(false);
   const [selectedRubricId, setSelectedRubricId] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const handleSelectFocus = (rubricId: string) => {
     setSelectedRubricId(rubricId);
     setFocusSelectorOpen(true);
+  };
+
+  const handleDeleteSubject = async () => {
+    setIsDeleting(true);
+    try {
+      // Get all rubric IDs for this subject
+      const rubricIds = rubrics.map(r => r.id);
+
+      if (rubricIds.length > 0) {
+        // Get all focus profiles for these rubrics
+        const { data: focusProfiles } = await supabase
+          .from('focus_profiles')
+          .select('id')
+          .in('rubric_id', rubricIds);
+
+        const focusProfileIds = focusProfiles?.map(fp => fp.id) || [];
+
+        // Get all assignments for these rubrics
+        const { data: assignments } = await supabase
+          .from('assignments')
+          .select('id')
+          .in('rubric_id', rubricIds);
+
+        const assignmentIds = assignments?.map(a => a.id) || [];
+
+        if (assignmentIds.length > 0) {
+          // Get all submissions for these assignments
+          const { data: submissions } = await supabase
+            .from('submissions')
+            .select('id, file_path')
+            .in('assignment_id', assignmentIds);
+
+          const submissionIds = submissions?.map(s => s.id) || [];
+
+          // Delete results for these submissions
+          if (submissionIds.length > 0) {
+            await supabase
+              .from('results')
+              .delete()
+              .in('submission_id', submissionIds);
+
+            // Delete submission files from storage
+            const filePaths = submissions?.map(s => s.file_path).filter(Boolean) || [];
+            if (filePaths.length > 0) {
+              await supabase.storage.from('submissions').remove(filePaths);
+            }
+
+            // Delete submissions
+            await supabase
+              .from('submissions')
+              .delete()
+              .in('id', submissionIds);
+          }
+
+          // Delete assignments
+          await supabase
+            .from('assignments')
+            .delete()
+            .in('id', assignmentIds);
+        }
+
+        // Delete focus profiles
+        if (focusProfileIds.length > 0) {
+          await supabase
+            .from('focus_profiles')
+            .delete()
+            .in('id', focusProfileIds);
+        }
+
+        // Delete rubric files from storage
+        const rubricFilePaths = rubrics.map(r => r.file_path).filter(Boolean) as string[];
+        if (rubricFilePaths.length > 0) {
+          await supabase.storage.from('rubrics').remove(rubricFilePaths);
+        }
+
+        // Delete rubrics
+        await supabase
+          .from('rubrics')
+          .delete()
+          .in('id', rubricIds);
+      }
+
+      // Finally delete the subject
+      const { error } = await supabase
+        .from('subjects')
+        .delete()
+        .eq('id', subject.id);
+
+      if (error) throw error;
+
+      toast.success(`Subject "${subject.name}" deleted successfully`);
+      onRefresh();
+    } catch (error: any) {
+      console.error('Error deleting subject:', error);
+      toast.error('Failed to delete subject');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const getRubricStatus = (rubric: Rubric) => {
@@ -62,9 +175,44 @@ export function SubjectCard({ subject, rubrics, onRefresh }: SubjectCardProps) {
               />
               {subject.name}
             </CardTitle>
-            <Badge variant="secondary">
-              {rubrics.length} {rubrics.length === 1 ? 'rubric' : 'rubrics'}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary">
+                {rubrics.length} {rubrics.length === 1 ? 'rubric' : 'rubrics'}
+              </Badge>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                    disabled={isDeleting}
+                  >
+                    {isDeleting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete Subject</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Are you sure you want to delete "{subject.name}"? This will also delete all rubrics, assignments, submissions, and grading results associated with this subject. This action cannot be undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction 
+                      onClick={handleDeleteSubject}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
