@@ -114,6 +114,39 @@ serve(async (req) => {
       { global: { headers: { Authorization: authHeader } } }
     );
 
+    // Get user ID from JWT for rate limiting
+    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    if (userError || !user) {
+      console.error('[grade-submission] Failed to get user:', userError?.message);
+      return new Response(
+        JSON.stringify({ error: ERROR_MESSAGES.AUTH_FAILED }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Create service client for rate limiting check
+    serviceClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    // Check rate limit (5 requests per minute for grading)
+    const { data: withinLimit, error: rateLimitError } = await serviceClient.rpc('check_rate_limit', {
+      p_user_id: user.id,
+      p_endpoint: 'grade-submission',
+      p_max_requests: 5
+    });
+
+    if (rateLimitError) {
+      console.error('[grade-submission] Rate limit check failed:', rateLimitError.message);
+    } else if (!withinLimit) {
+      console.log('[grade-submission] Rate limit exceeded for user:', user.id);
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Please wait a minute before trying again.' }),
+        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // Verify ownership - use user client to respect RLS
     const { data: submission, error: submissionError } = await userClient
       .from('submissions')
