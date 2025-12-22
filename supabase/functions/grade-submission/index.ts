@@ -2,6 +2,48 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 import * as path from "https://deno.land/std@0.168.0/path/mod.ts";
+import { ZipReader, BlobReader, TextWriter } from "https://deno.land/x/zipjs@v2.7.32/index.js";
+
+// Helper function to extract text from DOCX
+async function extractTextFromDocx(fileData: Blob): Promise<string> {
+  try {
+    const zipReader = new ZipReader(new BlobReader(fileData));
+    const entries = await zipReader.getEntries();
+    
+    // Find the main document content
+    const documentEntry = entries.find(e => e.filename === 'word/document.xml');
+    if (!documentEntry) {
+      throw new Error('No document.xml found in DOCX');
+    }
+    
+    const textWriter = new TextWriter();
+    const xmlContent = await documentEntry.getData!(textWriter);
+    await zipReader.close();
+    
+    // Parse XML and extract text content
+    // Remove XML tags and extract text between <w:t> tags
+    const textMatches = xmlContent.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+    const extractedText = textMatches
+      .map(match => {
+        const textMatch = match.match(/<w:t[^>]*>([^<]*)<\/w:t>/);
+        return textMatch ? textMatch[1] : '';
+      })
+      .join('');
+    
+    // Add paragraph breaks where there are paragraph markers
+    const withParagraphs = xmlContent
+      .replace(/<\/w:p>/g, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    // Use the version with paragraphs for better formatting
+    return withParagraphs || extractedText;
+  } catch (error) {
+    console.error('[grade-submission] DOCX extraction error:', error);
+    throw error;
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -220,9 +262,27 @@ serve(async (req) => {
       // Plain text files can be read directly
       submissionText = await fileData.text();
       console.log('[grade-submission] Read plain text file, length:', submissionText.length);
-    } else {
-      // For PDF and DOCX, use Lovable AI vision to extract text
-      console.log('[grade-submission] Using AI vision to extract text from:', fileExtension);
+    } else if (fileExtension === '.docx') {
+      // Parse DOCX files by extracting XML content
+      console.log('[grade-submission] Parsing DOCX file');
+      try {
+        submissionText = await extractTextFromDocx(fileData);
+        console.log('[grade-submission] Extracted text from DOCX, length:', submissionText.length);
+      } catch (docxError) {
+        console.error('[grade-submission] DOCX parsing failed:', docxError);
+        await serviceClient
+          .from('submissions')
+          .update({ status: 'error' })
+          .eq('id', submissionId);
+        
+        return new Response(
+          JSON.stringify({ error: 'Could not parse DOCX file. Please ensure the file is valid.' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    } else if (fileExtension === '.pdf') {
+      // For PDF files, use AI vision to extract text
+      console.log('[grade-submission] Using AI vision to extract text from PDF');
       
       const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
       if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
@@ -230,11 +290,6 @@ serve(async (req) => {
       // Convert file to base64
       const arrayBuffer = await fileData.arrayBuffer();
       const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-      
-      // Determine MIME type
-      let mimeType = 'application/octet-stream';
-      if (fileExtension === '.pdf') mimeType = 'application/pdf';
-      else if (fileExtension === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       
       const extractionResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
         method: 'POST',
@@ -250,12 +305,12 @@ serve(async (req) => {
               content: [
                 {
                   type: 'text',
-                  text: 'Extract ALL text content from this document. Return ONLY the extracted text, preserving the original structure and formatting as much as possible. Do not summarize or interpret - just extract the complete text verbatim.'
+                  text: 'Extract ALL text content from this PDF document. Return ONLY the extracted text, preserving the original structure and formatting as much as possible. Do not summarize or interpret - just extract the complete text verbatim.'
                 },
                 {
                   type: 'image_url',
                   image_url: {
-                    url: `data:${mimeType};base64,${base64Data}`
+                    url: `data:application/pdf;base64,${base64Data}`
                   }
                 }
               ]
@@ -265,7 +320,7 @@ serve(async (req) => {
       });
 
       if (!extractionResponse.ok) {
-        console.error('[grade-submission] Text extraction failed:', { status: extractionResponse.status });
+        console.error('[grade-submission] PDF text extraction failed:', { status: extractionResponse.status });
         await serviceClient
           .from('submissions')
           .update({ status: 'error' })
@@ -279,20 +334,32 @@ serve(async (req) => {
 
       const extractionData = await extractionResponse.json();
       submissionText = extractionData.choices?.[0]?.message?.content || '';
-      console.log('[grade-submission] Extracted text from document, length:', submissionText.length);
+      console.log('[grade-submission] Extracted text from PDF, length:', submissionText.length);
+    } else {
+      // Unsupported file type
+      console.error('[grade-submission] Unsupported file type:', fileExtension);
+      await serviceClient
+        .from('submissions')
+        .update({ status: 'error' })
+        .eq('id', submissionId);
       
-      if (!submissionText || submissionText.length < 50) {
-        console.error('[grade-submission] Insufficient text extracted from document');
-        await serviceClient
-          .from('submissions')
-          .update({ status: 'error' })
-          .eq('id', submissionId);
-        
-        return new Response(
-          JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
+      return new Response(
+        JSON.stringify({ error: 'Unsupported file type. Please upload PDF, DOCX, or TXT files.' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!submissionText || submissionText.length < 50) {
+      console.error('[grade-submission] Insufficient text extracted from document');
+      await serviceClient
+        .from('submissions')
+        .update({ status: 'error' })
+        .eq('id', submissionId);
+      
+      return new Response(
+        JSON.stringify({ error: 'Could not extract text from document. Please ensure the file is readable.' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
     
     // Intelligently truncate if text is too long
