@@ -422,7 +422,7 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
     const criteriaContext = selectedCriteria.map(c => 
-      `- ${c.name} (Max ${c.weight} points): ${c.description}`
+      `- ID: "${c.id}" | Name: ${c.name} | Max Points: ${c.weight} | Description: ${c.description}`
     ).join('\n');
 
     const totalMaxPoints = selectedCriteria.reduce((sum, c) => sum + c.weight, 0);
@@ -477,8 +477,8 @@ ${processedText}
 ---
 
 Grade this submission using the criteria above. For each criterion:
-1. Use the criterion's id field as the criterion_id
-2. Score from 0 to the max points listed
+1. IMPORTANT: Use the exact ID value (the string after "ID:") as the criterion_id - for example if a criterion shows 'ID: "showcasing_evidence"' then criterion_id must be "showcasing_evidence"
+2. Score from 0 to the max points listed for that criterion
 3. Explain your score with specific references to the student's work
 4. Include 2-3 direct quotes from the submission as evidence
 
