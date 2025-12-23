@@ -40,7 +40,10 @@ export default function Results() {
           submissions!inner(
             student_name,
             status,
-            created_at
+            created_at,
+            file_path,
+            assignment_id,
+            assignments!inner(focus_profile_id)
           )
         `)
         .eq("user_id", user.id)
@@ -101,6 +104,34 @@ export default function Results() {
       loadResults();
     } catch (error: any) {
       console.error("Delete submission error:", error);
+      toast.error("Failed to delete paper");
+    }
+  };
+
+  const handleDeleteResult = async (resultId: string, submissionId: string) => {
+    try {
+      // Get the submission file path first
+      const { data: submission } = await supabase
+        .from('submissions')
+        .select('file_path')
+        .eq('id', submissionId)
+        .single();
+
+      // Delete file from storage
+      if (submission?.file_path) {
+        await supabase.storage.from('submissions').remove([submission.file_path]);
+      }
+
+      // Delete result
+      await supabase.from('results').delete().eq('id', resultId);
+
+      // Delete submission
+      await supabase.from('submissions').delete().eq('id', submissionId);
+
+      toast.success("Paper deleted successfully");
+      loadResults();
+    } catch (error: any) {
+      console.error("Delete result error:", error);
       toast.error("Failed to delete paper");
     }
   };
@@ -217,12 +248,11 @@ export default function Results() {
             {results.map((result) => (
               <Card
                 key={result.id}
-                className="cursor-pointer hover:shadow-lg transition-shadow"
-                onClick={() => navigate(`/results/${result.id}`)}
+                className="hover:shadow-lg transition-shadow"
               >
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between">
-                    <div className="flex-1">
+                    <div className="flex-1 cursor-pointer" onClick={() => navigate(`/results/${result.id}`)}>
                       <CardTitle className="text-xl">
                         {(result.submissions as any).student_name}
                       </CardTitle>
@@ -230,17 +260,53 @@ export default function Results() {
                         {new Date((result.submissions as any).created_at).toLocaleDateString()}
                       </p>
                     </div>
-                    <div className="flex flex-col items-end gap-2">
-                      <div className={`${getScoreColor(result.overall_score)} text-white px-4 py-2 rounded-lg font-bold text-xl`}>
-                        {Math.round(result.overall_score)}%
+                    <div className="flex items-start gap-3">
+                      <div className="flex flex-col items-end gap-2">
+                        <div className={`${getScoreColor(result.overall_score)} text-white px-4 py-2 rounded-lg font-bold text-xl`}>
+                          {Math.round(result.overall_score)}%
+                        </div>
+                        <Badge className={getConfidenceBadge(result.confidence)}>
+                          {result.confidence} confidence
+                        </Badge>
                       </div>
-                      <Badge className={getConfidenceBadge(result.confidence)}>
-                        {result.confidence} confidence
-                      </Badge>
+                      <div className="flex flex-col gap-1">
+                        <RetryGradingButton
+                          submissionId={result.submission_id}
+                          focusProfileId={(result.submissions as any).assignments?.focus_profile_id}
+                          onSuccess={() => {
+                            loadResults();
+                            loadPendingSubmissions();
+                          }}
+                        />
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="sm">
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Delete Graded Paper?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                This will permanently delete "{(result.submissions as any).student_name}" and its grading results. This action cannot be undone.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction 
+                                onClick={() => handleDeleteResult(result.id, result.submission_id)}
+                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              >
+                                Delete
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
                     </div>
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="cursor-pointer" onClick={() => navigate(`/results/${result.id}`)}>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <h4 className="font-semibold text-sm mb-2 text-green-600">Strengths</h4>
