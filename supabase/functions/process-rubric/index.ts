@@ -307,6 +307,8 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
+    console.log('[process-rubric] Calling AI to extract criteria from text');
+
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -314,54 +316,32 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-pro',
+        model: 'google/gemini-2.5-flash',
         messages: [
           {
             role: 'system',
-            content: 'You are an expert at analyzing educational rubrics. Extract all grading criteria from the rubric and return them as a structured JSON array. Each criterion should have: name, description, weight (points), and category.'
+            content: `You are an expert at analyzing educational rubrics. Extract all grading criteria from the rubric.
+Return ONLY a valid JSON object with this exact structure, no other text:
+{"criteria": [{"id": "unique_snake_case_id", "name": "Criterion Name", "description": "What this criterion measures", "weight": 10, "category": "Content|Style|Mechanics|Organization"}]}
+
+Rules:
+- Each criterion must have a unique id in snake_case
+- Weight should be the point value or percentage for that criterion
+- Category should be one of: Content, Style, Mechanics, Organization, or a similar category from the rubric
+- Extract ALL criteria mentioned in the rubric`
           },
           {
             role: 'user',
-            content: `Extract all grading criteria from this rubric:\n\n${fileText}\n\nReturn ONLY a JSON object with this structure: {"criteria": [{"id": "unique_id", "name": "criterion name", "description": "what this measures", "weight": 5, "category": "Content/Style/Mechanics"}]}`
+            content: `Extract all grading criteria from this rubric:\n\n${fileText}`
           }
         ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "extract_criteria",
-              description: "Extract grading criteria from a rubric",
-              parameters: {
-                type: "object",
-                properties: {
-                  criteria: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        id: { type: "string" },
-                        name: { type: "string" },
-                        description: { type: "string" },
-                        weight: { type: "number" },
-                        category: { type: "string" }
-                      },
-                      required: ["id", "name", "description", "weight", "category"],
-                      additionalProperties: false
-                    }
-                  }
-                },
-                required: ["criteria"],
-                additionalProperties: false
-              }
-            }
-          }
-        ],
-        tool_choice: { type: "function", function: { name: "extract_criteria" } }
+        response_format: { type: "json_object" }
       }),
     });
 
     if (!aiResponse.ok) {
-      console.error('[process-rubric] AI API error:', { status: aiResponse.status });
+      const errorText = await aiResponse.text();
+      console.error('[process-rubric] AI API error:', { status: aiResponse.status, error: errorText });
       
       if (aiResponse.status === 429) {
         return new Response(
@@ -384,23 +364,27 @@ serve(async (req) => {
     }
 
     const aiData = await aiResponse.json();
+    console.log('[process-rubric] AI response received');
 
     let criteria: Criterion[] = [];
     
-    if (aiData.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments) {
-      const parsedArgs = JSON.parse(aiData.choices[0].message.tool_calls[0].function.arguments);
+    try {
+      const content = aiData.choices?.[0]?.message?.content || '{}';
+      console.log('[process-rubric] AI content:', content.substring(0, 200));
+      
+      // Parse the JSON response
+      const parsedContent = JSON.parse(content);
       
       // Validate AI response structure
-      try {
-        const validated = aiResponseSchema.parse(parsedArgs);
-        criteria = validated.criteria;
-      } catch (validationError) {
-        console.error('[process-rubric] AI response validation failed');
-        return new Response(
-          JSON.stringify({ error: ERROR_MESSAGES.AI_ERROR }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
+      const validated = aiResponseSchema.parse(parsedContent);
+      criteria = validated.criteria;
+      console.log('[process-rubric] Extracted', criteria.length, 'criteria');
+    } catch (parseError: any) {
+      console.error('[process-rubric] AI response parsing failed:', parseError.message);
+      return new Response(
+        JSON.stringify({ error: 'Failed to parse rubric criteria. Please try again.' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     // Update rubric with extracted criteria (using service client after ownership verified)
